@@ -1,162 +1,306 @@
-# Search Typeahead System
+# 🔍 NexusSearch — Search Typeahead System
 
-A production-style Search Typeahead/Autocomplete System featuring:
-- **React Frontend**: Built using Vite, TypeScript, and Tailwind CSS. Offers a modern search bar, autocomplete suggestion dropdown, keyboard navigation, and a live Developer Telemetry Dashboard.
-- **FastAPI Backend**: Serving endpoints with low latency, incorporating latency metric calculations (p95 and average).
-- **PostgreSQL Database**: Indexed for character prefix queries and historic telemetry updates.
-- **Distributed Redis Cache Layer**: Routes prefixes across three logical caches (`cache-node-1`, `cache-node-2`, `cache-node-3`) using a custom **Consistent Hashing Ring** with virtual node replication.
-- **Trie Service**: Implements prefix-based autocomplete lookup in $O(\text{prefix length})$ time using precomputed suggestion caches.
-- **Batch Write Queue**: Buffers database writes to protect PostgreSQL from I/O load, merging and bulk upserting search submissions periodically.
-- **Trending Scoring**: Calculated using an exponential time-decay formula combining search popularity with search event recency.
+A production-grade **Search Autocomplete / Typeahead** system built as a High-Level Design (HLD) assignment. It demonstrates distributed systems concepts including a Trie-based prefix search engine, consistent hashing across a Redis cluster, batch write buffering, and recency-weighted trending scores.
 
 ---
 
-## 1. Quick Start (Docker Compose)
+## 🏗️ Architecture Overview
 
-The entire application stack (PostgreSQL, 3 Redis Cache containers, FastAPI Backend, and React Frontend) can be initialized with one command:
+```
+User Types "iph"
+      │
+      ▼
+┌─────────────────┐
+│  React Frontend  │  (Vite + TypeScript + Tailwind)
+│  localhost:3000  │
+└────────┬────────┘
+         │ GET /api/suggest?q=iph
+         ▼
+┌─────────────────┐       ┌─────────────────────────────────┐
+│  FastAPI Backend │──────▶│  Consistent Hash Ring           │
+│  localhost:8000  │       │  ┌──────────┐ ┌──────────┐    │
+└────────┬────────┘       │  │ Redis #1 │ │ Redis #2 │    │
+         │                │  └──────────┘ └──────────┘    │
+         │                │       ┌──────────┐             │
+         │                │       │ Redis #3 │             │
+         ▼                │       └──────────┘             │
+┌─────────────────┐       └─────────────────────────────────┘
+│  Trie Service   │
+│  (In-Memory)    │
+└────────┬────────┘
+         │  (on miss)
+         ▼
+┌─────────────────┐
+│   PostgreSQL    │
+│  search_queries │
+└─────────────────┘
+```
+
+### Key Components
+
+| Component | Technology | Role |
+|-----------|-----------|------|
+| Frontend | React + Vite + TypeScript + Tailwind | Search UI, dashboard, cache routing display |
+| Backend | FastAPI + Python 3.12 | REST API, orchestration |
+| Trie Service | In-memory Python | O(prefix_len) autocomplete lookup |
+| Cache Layer | Redis ×3 (Consistent Hashing) | Prefix result caching across 3 logical nodes |
+| Database | PostgreSQL 16 | Persistent query store, search events |
+| Batch Writer | Python threading | Buffers writes, reduces DB I/O pressure |
+| Trending Engine | Background scheduler | Recency-weighted score recalculation every 60s |
+
+---
+
+## 🚀 Quick Start with Docker
+
+> **Requirements:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running.
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/Neeshu24619-20904/-HLD-Assignment-.git
+cd "-HLD-Assignment-"
+```
+
+### 2. Start all services
 
 ```bash
 docker compose up --build
 ```
 
-### Accessing the Stack
-- **Frontend App**: [http://localhost:3000](http://localhost:3000)
-- **FastAPI API Server**: [http://localhost:8000](http://localhost:8000)
-- **Interactive Swagger Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
+This one command will:
+- Build the **backend** and **frontend** Docker images
+- Start **PostgreSQL**, **3 Redis nodes**, the **FastAPI backend**, and the **React frontend**
+- Automatically **generate and seed 105,000 queries** into PostgreSQL
+- Load all queries into the **Trie** and start the **trending scheduler**
 
-### Seeding the 100,000+ Query Dataset
-Once the containers are running and database tables are initialized, run the seed script to generate and load the 100,000+ query corpus:
+> ⏳ **First run:** ~2–3 minutes (image downloads + DB seeding).  
+> ⚡ **Subsequent runs:** ~30 seconds (images and DB already ready).
+
+### 3. Open the app
+
+| Service | URL |
+|---------|-----|
+| 🌐 Frontend (Search UI) | http://localhost:3000 |
+| ⚡ Backend API | http://localhost:8000 |
+| 📖 Swagger API Docs | http://localhost:8000/docs |
+
+---
+
+## ✅ What to Expect on Startup
+
+Watch the logs with:
+```bash
+docker compose logs -f backend
+```
+
+You should see this sequence, confirming everything is healthy:
+
+```
+Generating 105000 unique queries...
+Dataset CSV created successfully. Total rows: 105000
+Seeded 20000 / 105000 queries.
+Seeded 40000 / 105000 queries.
+...
+Seeded 105000 / 105000 queries.
+Seeded 820 historical search events successfully.
+Dataset setup completed successfully!
+Trie successfully reloaded with 105000 queries.
+Application startup complete.
+Uvicorn running on http://0.0.0.0:8000
+```
+
+---
+
+## 🛑 Stopping & Resetting
+
+| Action | Command |
+|--------|---------|
+| Stop all containers (keep data) | `docker compose down` |
+| Stop and **wipe the database** (full reset) | `docker compose down -v` |
+| Run in background (detached) | `docker compose up --build -d` |
+| Rebuild only the backend | `docker compose up --build backend` |
+| View live backend logs | `docker compose logs -f backend` |
+
+---
+
+## 📡 API Reference
+
+### `GET /api/suggest?q=<prefix>`
+Returns up to 10 prefix-matched autocomplete suggestions sorted by trending score.
 
 ```bash
-docker compose exec backend python scripts/load_dataset.py
+# PowerShell
+Invoke-RestMethod "http://localhost:8000/api/suggest?q=iphone"
+
+# Response
+{
+  "suggestions": [
+    { "query": "iphone 15 pro", "count": 144 },
+    { "query": "iphone tutorial", "count": 5553 },
+    ...
+  ]
+}
 ```
-This script:
-1. Dynamically generates a Zipfian-distributed search query dataset if `dataset/queries.csv` doesn't exist.
-2. Bulk upserts the queries in high-speed database transaction batches.
-3. Inserts initial historical search event logs for trending calculations.
-4. Triggers the backend Trie to load.
 
 ---
 
-## 2. API Documentation
+### `POST /api/search`
+Submits a search query. Writes are batched in-memory and flushed to PostgreSQL every 30 seconds (or when buffer hits 100 entries).
 
-### 1. Autocomplete Suggestions API
-Returns up to 10 suggestions starting with the prefix, sorted by trending ranking score. Handles empty cases, mixed case, and special characters.
+```bash
+# PowerShell
+Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/search" `
+  -ContentType "application/json" `
+  -Body '{"query": "iphone 15 pro"}'
 
-* **URL**: `/api/suggest`
-* **Method**: `GET`
-* **Query Params**: `q=<prefix>`
-* **Response (HTTP 200)**:
-  ```json
-  {
-    "suggestions": [
-      { "query": "iphone 15 pro", "count": 85000 },
-      { "query": "iphone charger", "count": 60000 }
-    ]
-  }
-  ```
-
-### 2. Search Submission API
-Submits a query to the search system. Increments the query's search count (creates a new query entry if non-existent). To protect Postgres, writes are buffered in-memory and flushed in batches.
-
-* **URL**: `/api/search`
-* **Method**: `POST`
-* **Payload**:
-  ```json
-  { "query": "iphone case" }
-  ```
-* **Response (HTTP 200)**:
-  ```json
-  { "message": "Searched" }
-  ```
-
-### 3. Global Trending API
-Fetches the top 10 global trending queries calculated using recent search events with a decay factor.
-
-* **URL**: `/api/trending`
-* **Method**: `GET`
-* **Response (HTTP 200)**:
-  ```json
-  {
-    "trending": [
-      { "query": "react tailwind", "count": 150 },
-      { "query": "iphone 15 pro", "count": 220 }
-    ]
-  }
-  ```
-
-### 4. Cache Routing Debug API
-Used to inspect which Redis cache node owns the prefix hash on the consistent hashing ring, and if it's currently cached (HIT/MISS).
-
-* **URL**: `/api/cache/debug`
-* **Method**: `GET`
-* **Query Params**: `prefix=<prefix>`
-* **Response (HTTP 200)**:
-  ```json
-  {
-    "prefix": "iph",
-    "cache_node": "cache-node-2",
-    "cache_hit": true
-  }
-  ```
-
-### 5. Telemetry Metrics API
-Exposes average and p95 latencies, cache hit/miss count, cache hit rate (%), database writes saved, and current buffer size for dashboard analytics consumption.
-
-* **URL**: `/api/metrics`
-* **Method**: `GET`
-* **Response (HTTP 200)**:
-  ```json
-  {
-    "db_writes_saved": 87,
-    "batch_flushes": 12,
-    "queue_size": 0,
-    "cache_hits": 142,
-    "cache_misses": 53,
-    "cache_hit_rate": 72.82,
-    "avg_latency_ms": 0.42,
-    "p95_latency_ms": 1.15
-  }
-  ```
+# Response
+{ "message": "Searched" }
+```
 
 ---
 
-## 3. Developer & Admin Dashboard
+### `GET /api/trending`
+Returns the top 10 globally trending queries, ranked by a recency-weighted score:
+`score = 0.7 × normalized_total_count + 0.3 × recent_activity`
 
-The application embeds an **Admin Analytics Dashboard** at `/admin` (accessible via the navigation header in the top-right):
-1. **Performance Telemetry**: Gauges tracking p95 latency and average latency of auto-complete recommendations.
-2. **Cache hit counters**: Live chart displaying cache hit rate % and total count of requests routed.
-3. **Database Write Savings**: Demonstrates batching efficiency by showing total DB writes avoided.
-4. **Consistent Hashing Terminal**: Logs the query prefixes and shows how the Consistent Hashing Ring routes key ownership clockwise (e.g. `Prefix "pyt" routed to [cache-node-1]`).
-5. **Live Trending Rankings**: Real-time ranking of top queries based on time-decay decay algorithms.
+```bash
+Invoke-RestMethod "http://localhost:8000/api/trending"
+
+# Response
+{
+  "trending": [
+    { "query": "react tailwind", "count": 661 },
+    { "query": "iphone 15 pro",  "count": 144 },
+    ...
+  ]
+}
+```
 
 ---
 
-## 4. Manual/Local Dev Setup (No Docker)
+### `GET /api/cache/debug?prefix=<prefix>`
+Shows which Redis node owns the prefix key (via consistent hashing) and whether it is currently cached.
 
-If you prefer to run the system natively outside Docker on your host machine:
+```bash
+Invoke-RestMethod "http://localhost:8000/api/cache/debug?prefix=react"
 
-### Backend
-1. **Requirements**: Python 3.12, PostgreSQL server, and Redis server running locally.
-2. Configure settings inside `backend/.env` (connection URLs default to localhost).
-3. Install dependencies and start server:
-   ```bash
-   cd backend
-   pip install -r requirements.txt
-   uvicorn app.main:app --reload --port 8000
-   ```
-4. Seed database in a separate terminal:
-   ```bash
-   cd backend
-   python scripts/load_dataset.py
-   ```
+# Response
+{
+  "prefix":     "react",
+  "cache_node": "cache-node-3",
+  "cache_hit":  true
+}
+```
 
-### Frontend
-1. **Requirements**: Node.js (v18+) and npm installed.
-2. Install modules and start the development server:
-   ```bash
-   cd frontend
-   npm install
-   npm run dev
-   ```
-3. Open [http://localhost:5173](http://localhost:5173) in your browser.
+---
+
+### `GET /api/metrics`
+Returns live telemetry: latency stats, cache hit/miss counts, and batch write savings.
+
+```bash
+Invoke-RestMethod "http://localhost:8000/api/metrics"
+
+# Response
+{
+  "db_writes_saved":  87,
+  "batch_flushes":    12,
+  "queue_size":        0,
+  "cache_hits":       142,
+  "cache_misses":      53,
+  "cache_hit_rate":  72.82,
+  "avg_latency_ms":   0.42,
+  "p95_latency_ms":   1.15
+}
+```
+
+---
+
+## 🧭 Frontend Features
+
+### Search Tab
+- **Live typeahead dropdown** — suggestions appear after 300ms debounce
+- **Keyboard navigation** — `↑ ↓` to navigate, `Enter` to select, `Escape` to close
+- **Consistent Hash indicator** — shows which Redis node owns the current prefix and cache HIT/MISS status in real time
+- **Trending section** — clickable trending query tags at the bottom
+
+### Dashboard Tab (Admin)
+- **Latency gauges** — avg and p95 latency
+- **Cache hit rate chart** — live hit/miss ratio
+- **DB write savings** — demonstrates batch write efficiency
+- **Consistent hash routing log** — shows prefix → node routing history
+- **Live trending rankings** — top queries updated every minute
+
+---
+
+## ⚙️ How the System Works
+
+### 1. Trie (Prefix Search)
+- All 105,000 queries are loaded into an in-memory Trie at startup
+- Each Trie node stores the **top 10 suggestions** passing through it (precomputed)
+- Lookup is `O(prefix_length)` — no database query needed on a cache miss
+
+### 2. Consistent Hashing (Redis Layer)
+- A hash ring with **50 virtual nodes per physical node** maps prefix keys to one of 3 Redis containers
+- Each prefix always routes to the same node — deterministic and load-balanced
+- On Redis cache **miss**: Trie is queried → result is stored back into Redis (TTL 300s)
+
+### 3. Batch Write Queue
+- Every user search is pushed to an **in-memory buffer**
+- Buffer is flushed to PostgreSQL every **30 seconds** or when it reaches **100 entries**
+- Reduces N individual DB writes to 1 bulk upsert per flush cycle
+
+### 4. Trending Score
+- A background scheduler recalculates scores every **60 seconds**
+- Formula: `score = 0.7 × norm_total_count + 0.3 × norm_recent_activity`
+- Recent activity is weighted: last 1 hour (`×1.0`), last 24 hours (`×0.5`), last 7 days (`×0.1`)
+- After recalculation, the Trie is atomically rebuilt with new scores
+
+---
+
+## 🗂️ Project Structure
+
+```
+HLD-Assignment/
+├── docker-compose.yml          # Orchestrates all 6 containers
+├── backend/
+│   ├── Dockerfile
+│   ├── .dockerignore
+│   ├── requirements.txt
+│   ├── app/
+│   │   ├── main.py             # FastAPI app + lifespan startup
+│   │   ├── api/routes.py       # All API endpoints
+│   │   ├── core/
+│   │   │   ├── config.py       # Settings (env vars)
+│   │   │   └── database.py     # SQLAlchemy engine + session
+│   │   ├── models/search.py    # SearchQuery + SearchEvent ORM models
+│   │   ├── schemas/search.py   # Pydantic request/response schemas
+│   │   └── services/
+│   │       ├── trie.py         # Trie data structure + TrieService
+│   │       ├── cache_service.py# Redis consistent hash cache layer
+│   │       ├── consistent_hash.py # Hash ring implementation
+│   │       ├── trending.py     # Score recalculation + scheduler
+│   │       └── batch_writer.py # Buffered write queue
+│   └── scripts/
+│       └── load_dataset.py     # Dataset generation + DB seed script
+└── frontend/
+    ├── Dockerfile
+    └── src/
+        ├── App.tsx
+        ├── components/
+        │   ├── SearchBox.tsx       # Main search input + dropdown
+        │   ├── TrendingList.tsx    # Trending tags display
+        │   └── AnalyticsDashboard.tsx # Admin metrics dashboard
+        └── services/api.ts         # All fetch calls to the backend
+```
+
+---
+
+## 🛠️ Tech Stack
+
+| Layer | Stack |
+|-------|-------|
+| Frontend | React 18, TypeScript, Vite, Tailwind CSS, Lucide Icons |
+| Backend | Python 3.12, FastAPI, Uvicorn, SQLAlchemy 2.0, Pydantic v2 |
+| Database | PostgreSQL 16 |
+| Cache | Redis 7 (×3 nodes) |
+| Containerization | Docker, Docker Compose |
